@@ -106,6 +106,41 @@ a {
   align-items: center;
 }
 
+.controls-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+  align-items: center;
+}
+
+.toggle-row {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: #334155;
+  font-size: 14px;
+}
+
+.select-input {
+  padding: 10px 12px;
+  border: 1px solid #d7dfeb;
+  border-radius: 10px;
+  background: #ffffff;
+  color: #0f172a;
+  font-size: 14px;
+}
+
+.ghost-button {
+  background: #334155;
+  min-width: auto;
+}
+
+.support-note {
+  margin: 0;
+  font-size: 13px;
+  color: #64748b;
+}
+
 .text-input {
   flex: 1;
   padding: 12px 14px;
@@ -186,6 +221,18 @@ a {
   .input-row {
     flex-direction: column;
     align-items: stretch;
+  }
+
+  .controls-row {
+    align-items: stretch;
+  }
+
+  .toggle-row {
+    justify-content: space-between;
+  }
+
+  .select-input {
+    width: 120px;
   }
 
   .secondary-button {

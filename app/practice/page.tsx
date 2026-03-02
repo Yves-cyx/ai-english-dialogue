@@ -1,6 +1,13 @@
 "use client";
 
-import { FormEvent, useCallback, useMemo, useState } from "react";
+import {
+  FormEvent,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 type DialogueMessage = {
   role: "user" | "assistant";
@@ -12,9 +19,59 @@ type DialogueResponse = {
   suggestions: string[];
 };
 
+type AccentPreference = "US" | "UK";
+
+type BrowserSpeechRecognitionEvent = {
+  resultIndex: number;
+  results: ArrayLike<{
+    isFinal: boolean;
+    0: { transcript: string };
+  }>;
+};
+
+type BrowserSpeechRecognition = {
+  continuous: boolean;
+  interimResults: boolean;
+  lang: string;
+  onresult: ((event: BrowserSpeechRecognitionEvent) => void) | null;
+  onerror: (() => void) | null;
+  onend: (() => void) | null;
+  start: () => void;
+  stop: () => void;
+};
+
+type BrowserSpeechRecognitionConstructor = new () => BrowserSpeechRecognition;
+
+type SpeechWindow = Window & {
+  SpeechRecognition?: BrowserSpeechRecognitionConstructor;
+  webkitSpeechRecognition?: BrowserSpeechRecognitionConstructor;
+};
+
+const MESSAGES_STORAGE_KEY = "aed_messages";
+const SPEAK_REPLIES_STORAGE_KEY = "aed_speak_replies";
+const ACCENT_STORAGE_KEY = "aed_accent";
+
 const SCENARIO_TITLE = "Hotel Check-in Conversation";
 const SCENARIO_INTRO =
   "Practice checking into a hotel after a long trip. Ask about rooms, amenities, and any special requests.";
+
+function isDialogueMessages(value: unknown): value is DialogueMessage[] {
+  if (!Array.isArray(value)) {
+    return false;
+  }
+
+  return value.every((item) => {
+    if (!item || typeof item !== "object") {
+      return false;
+    }
+
+    const record = item as Record<string, unknown>;
+    return (
+      (record.role === "user" || record.role === "assistant") &&
+      typeof record.content === "string"
+    );
+  });
+}
 
 export default function PracticePage() {
   const [input, setInput] = useState("");
@@ -22,19 +79,134 @@ export default function PracticePage() {
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [isLoading, setIsLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [isListening, setIsListening] = useState(false);
+  const [isSpeechRecognitionSupported, setIsSpeechRecognitionSupported] =
+    useState(false);
+  const [isSpeechSynthesisSupported, setIsSpeechSynthesisSupported] =
+    useState(false);
+  const [speakReplies, setSpeakReplies] = useState(true);
+  const [accent, setAccent] = useState<AccentPreference>("US");
+
+  const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
+  const transcriptRef = useRef("");
+  const messagesRef = useRef<DialogueMessage[]>([]);
+  const mountedRef = useRef(false);
 
   const hasDialogue = useMemo(() => messages.length > 0, [messages.length]);
 
-  const handleSubmit = useCallback(
-    async (event: FormEvent<HTMLFormElement>) => {
-      event.preventDefault();
-      const trimmed = input.trim();
-      if (!trimmed) return;
+  useEffect(() => {
+    messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    mountedRef.current = true;
+    const speechWindow = window as SpeechWindow;
+    const speechRecognition =
+      speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+
+    setIsSpeechRecognitionSupported(Boolean(speechRecognition));
+    setIsSpeechSynthesisSupported(typeof window.speechSynthesis !== "undefined");
+
+    try {
+      const storedMessages = window.localStorage.getItem(MESSAGES_STORAGE_KEY);
+      if (storedMessages) {
+        const parsed: unknown = JSON.parse(storedMessages);
+        if (isDialogueMessages(parsed)) {
+          setMessages(parsed);
+          messagesRef.current = parsed;
+        }
+      }
+    } catch {
+      // Ignore invalid persisted messages and continue with defaults.
+    }
+
+    const storedSpeakReplies = window.localStorage.getItem(
+      SPEAK_REPLIES_STORAGE_KEY
+    );
+    if (storedSpeakReplies === "true") {
+      setSpeakReplies(true);
+    } else if (storedSpeakReplies === "false") {
+      setSpeakReplies(false);
+    }
+
+    const storedAccent = window.localStorage.getItem(ACCENT_STORAGE_KEY);
+    if (storedAccent === "US" || storedAccent === "UK") {
+      setAccent(storedAccent);
+    }
+
+    return () => {
+      mountedRef.current = false;
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.stop();
+        } catch {
+          // Ignore stop failures during unmount cleanup.
+        }
+      }
+      if (typeof window.speechSynthesis !== "undefined") {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!mountedRef.current || typeof window === "undefined") {
+      return;
+    }
+
+    if (messages.length === 0) {
+      window.localStorage.removeItem(MESSAGES_STORAGE_KEY);
+      return;
+    }
+
+    window.localStorage.setItem(MESSAGES_STORAGE_KEY, JSON.stringify(messages));
+  }, [messages]);
+
+  useEffect(() => {
+    if (!mountedRef.current || typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(
+      SPEAK_REPLIES_STORAGE_KEY,
+      speakReplies ? "true" : "false"
+    );
+  }, [speakReplies]);
+
+  useEffect(() => {
+    if (!mountedRef.current || typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(ACCENT_STORAGE_KEY, accent);
+  }, [accent]);
+
+  const speakText = useCallback(
+    (text: string) => {
+      if (!speakReplies || !isSpeechSynthesisSupported || typeof window === "undefined") {
+        return;
+      }
+      window.speechSynthesis.cancel();
+      const utterance = new SpeechSynthesisUtterance(text);
+      window.speechSynthesis.speak(utterance);
+    },
+    [isSpeechSynthesisSupported, speakReplies]
+  );
+
+  const sendMessage = useCallback(
+    async (messageText: string) => {
+      const trimmed = messageText.trim();
+      if (!trimmed || isLoading || isListening) {
+        return;
+      }
 
       const userMessage: DialogueMessage = { role: "user", content: trimmed };
-      const nextMessages = [...messages, userMessage];
+      const nextMessages = [...messagesRef.current, userMessage];
 
       setMessages(nextMessages);
+      messagesRef.current = nextMessages;
       setIsLoading(true);
       setError(null);
 
@@ -64,13 +236,19 @@ export default function PracticePage() {
         }
 
         const data: DialogueResponse = await response.json();
+        const assistantMessage: DialogueMessage = {
+          role: "assistant",
+          content: data.reply,
+        };
 
-        setMessages((prev) => [
-          ...prev,
-          { role: "assistant", content: data.reply },
-        ]);
+        setMessages((prev) => {
+          const updated: DialogueMessage[] = [...prev, assistantMessage];
+          messagesRef.current = updated;
+          return updated;
+        });
         setSuggestions(data.suggestions);
         setInput("");
+        speakText(data.reply);
       } catch (err) {
         const message =
           err instanceof Error ? err.message : "Unable to send message.";
@@ -79,8 +257,116 @@ export default function PracticePage() {
         setIsLoading(false);
       }
     },
-    [input, messages]
+    [isLoading, isListening, speakText]
   );
+
+  const stopRecording = useCallback(() => {
+    const recognition = recognitionRef.current;
+    if (!recognition) {
+      return;
+    }
+    try {
+      recognition.stop();
+    } catch {
+      // Ignore stop failures from browser speech engine.
+    }
+    setIsListening(false);
+  }, []);
+
+  const startRecording = useCallback(() => {
+    if (isLoading || isListening || typeof window === "undefined") {
+      return;
+    }
+
+    const speechWindow = window as SpeechWindow;
+    const SpeechRecognitionCtor =
+      speechWindow.SpeechRecognition ?? speechWindow.webkitSpeechRecognition;
+
+    if (!SpeechRecognitionCtor) {
+      setIsSpeechRecognitionSupported(false);
+      return;
+    }
+
+    setError(null);
+    transcriptRef.current = "";
+
+    const recognition = new SpeechRecognitionCtor();
+    recognition.continuous = false;
+    recognition.interimResults = false;
+    recognition.lang = accent === "UK" ? "en-GB" : "en-US";
+
+    recognition.onresult = (event) => {
+      let finalTranscript = transcriptRef.current;
+      for (let i = event.resultIndex; i < event.results.length; i += 1) {
+        const result = event.results[i];
+        if (result?.isFinal) {
+          finalTranscript += `${result[0].transcript} `;
+        }
+      }
+      transcriptRef.current = finalTranscript;
+    };
+
+    recognition.onerror = () => {
+      setIsListening(false);
+      setError("Voice input failed. Please try again.");
+    };
+
+    recognition.onend = () => {
+      setIsListening(false);
+      recognitionRef.current = null;
+
+      const transcript = transcriptRef.current.trim();
+      transcriptRef.current = "";
+      if (!transcript) {
+        return;
+      }
+
+      setInput(transcript);
+      void sendMessage(transcript);
+    };
+
+    recognitionRef.current = recognition;
+    setIsListening(true);
+
+    try {
+      recognition.start();
+    } catch {
+      setIsListening(false);
+      recognitionRef.current = null;
+      setError("Unable to start voice recording in this browser.");
+    }
+  }, [accent, isListening, isLoading, sendMessage]);
+
+  const toggleRecording = useCallback(() => {
+    if (isListening) {
+      stopRecording();
+      return;
+    }
+    startRecording();
+  }, [isListening, startRecording, stopRecording]);
+
+  const handleSubmit = useCallback(
+    async (event: FormEvent<HTMLFormElement>) => {
+      event.preventDefault();
+      await sendMessage(input);
+    },
+    [input, sendMessage]
+  );
+
+  const handleClearChat = useCallback(() => {
+    stopRecording();
+    if (typeof window !== "undefined" && isSpeechSynthesisSupported) {
+      window.speechSynthesis.cancel();
+    }
+    setMessages([]);
+    messagesRef.current = [];
+    setSuggestions([]);
+    setInput("");
+    setError(null);
+    if (typeof window !== "undefined") {
+      window.localStorage.removeItem(MESSAGES_STORAGE_KEY);
+    }
+  }, [isSpeechSynthesisSupported, stopRecording]);
 
   return (
     <main className="page">
@@ -125,10 +411,67 @@ export default function PracticePage() {
             disabled={isLoading}
             aria-label="Message to send"
           />
-          <button className="secondary-button" type="submit" disabled={isLoading}>
+          <button
+            className="secondary-button"
+            type="submit"
+            disabled={isLoading || isListening}
+          >
             {isLoading ? "Sending..." : "Send"}
           </button>
         </form>
+
+        <div className="controls-row">
+          <button
+            className="secondary-button"
+            type="button"
+            onClick={toggleRecording}
+            disabled={isLoading || !isSpeechRecognitionSupported}
+          >
+            {isListening ? "Stop Recording" : "Start Recording"}
+          </button>
+
+          {isSpeechSynthesisSupported && (
+            <label className="toggle-row">
+              <input
+                type="checkbox"
+                checked={speakReplies}
+                onChange={(event) => setSpeakReplies(event.target.checked)}
+              />
+              Speak replies
+            </label>
+          )}
+
+          <label className="toggle-row">
+            Accent
+            <select
+              className="select-input"
+              value={accent}
+              onChange={(event) => setAccent(event.target.value as AccentPreference)}
+            >
+              <option value="US">US</option>
+              <option value="UK">UK</option>
+            </select>
+          </label>
+
+          <button
+            className="secondary-button ghost-button"
+            type="button"
+            onClick={handleClearChat}
+            disabled={isLoading}
+          >
+            Clear chat
+          </button>
+        </div>
+
+        {!isSpeechRecognitionSupported && (
+          <p className="support-note">Voice input not supported in this browser.</p>
+        )}
+
+        {isListening && (
+          <p className="status" role="status">
+            Listening...
+          </p>
+        )}
 
         {isLoading && (
           <p className="status" role="status">
