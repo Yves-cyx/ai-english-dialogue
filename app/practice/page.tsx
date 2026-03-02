@@ -8,6 +8,11 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  DEFAULT_SCENARIO_ID,
+  SCENARIOS,
+  getScenarioById,
+} from "../lib/scenarios";
 
 type DialogueMessage = {
   role: "user" | "assistant";
@@ -50,10 +55,9 @@ type SpeechWindow = Window & {
 const MESSAGES_STORAGE_KEY = "aed_messages";
 const SPEAK_REPLIES_STORAGE_KEY = "aed_speak_replies";
 const ACCENT_STORAGE_KEY = "aed_accent";
-
-const SCENARIO_TITLE = "Hotel Check-in Conversation";
+const SCENARIO_STORAGE_KEY = "aed_scenario_id";
 const SCENARIO_INTRO =
-  "Practice checking into a hotel after a long trip. Ask about rooms, amenities, and any special requests.";
+  "Choose a speaking scenario and practice a natural multi-turn conversation.";
 
 function isDialogueMessages(value: unknown): value is DialogueMessage[] {
   if (!Array.isArray(value)) {
@@ -86,6 +90,9 @@ export default function PracticePage() {
     useState(false);
   const [speakReplies, setSpeakReplies] = useState(true);
   const [accent, setAccent] = useState<AccentPreference>("US");
+  const [selectedScenarioId, setSelectedScenarioId] = useState(
+    DEFAULT_SCENARIO_ID
+  );
 
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const transcriptRef = useRef("");
@@ -93,6 +100,10 @@ export default function PracticePage() {
   const mountedRef = useRef(false);
 
   const hasDialogue = useMemo(() => messages.length > 0, [messages.length]);
+  const activeScenario = useMemo(
+    () => getScenarioById(selectedScenarioId),
+    [selectedScenarioId]
+  );
 
   useEffect(() => {
     messagesRef.current = messages;
@@ -136,6 +147,11 @@ export default function PracticePage() {
     const storedAccent = window.localStorage.getItem(ACCENT_STORAGE_KEY);
     if (storedAccent === "US" || storedAccent === "UK") {
       setAccent(storedAccent);
+    }
+
+    const storedScenarioId = window.localStorage.getItem(SCENARIO_STORAGE_KEY);
+    if (storedScenarioId && SCENARIOS.some((item) => item.id === storedScenarioId)) {
+      setSelectedScenarioId(storedScenarioId);
     }
 
     return () => {
@@ -183,6 +199,13 @@ export default function PracticePage() {
     window.localStorage.setItem(ACCENT_STORAGE_KEY, accent);
   }, [accent]);
 
+  useEffect(() => {
+    if (!mountedRef.current || typeof window === "undefined") {
+      return;
+    }
+    window.localStorage.setItem(SCENARIO_STORAGE_KEY, selectedScenarioId);
+  }, [selectedScenarioId]);
+
   const speakText = useCallback(
     (text: string) => {
       if (!speakReplies || !isSpeechSynthesisSupported || typeof window === "undefined") {
@@ -216,7 +239,7 @@ export default function PracticePage() {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             messages: nextMessages,
-            scenarioId: "hotel_checkin",
+            scenarioId: selectedScenarioId,
           }),
         });
 
@@ -257,7 +280,7 @@ export default function PracticePage() {
         setIsLoading(false);
       }
     },
-    [isLoading, isListening, speakText]
+    [isLoading, isListening, selectedScenarioId, speakText]
   );
 
   const stopRecording = useCallback(() => {
@@ -368,13 +391,56 @@ export default function PracticePage() {
     }
   }, [isSpeechSynthesisSupported, stopRecording]);
 
+  const handleScenarioChange = useCallback(
+    (nextScenarioId: string) => {
+      if (nextScenarioId === selectedScenarioId) {
+        return;
+      }
+
+      stopRecording();
+      if (typeof window !== "undefined" && isSpeechSynthesisSupported) {
+        window.speechSynthesis.cancel();
+      }
+
+      setSelectedScenarioId(nextScenarioId);
+      setMessages([]);
+      messagesRef.current = [];
+      setSuggestions([]);
+      setInput("");
+      setError(null);
+
+      if (typeof window !== "undefined") {
+        window.localStorage.removeItem(MESSAGES_STORAGE_KEY);
+      }
+    },
+    [isSpeechSynthesisSupported, selectedScenarioId, stopRecording]
+  );
+
   return (
     <main className="page">
       <section className="card" aria-live="polite">
         <div>
           <p className="muted">Scenario</p>
-          <h1 className="title">{SCENARIO_TITLE}</h1>
+          <h1 className="title">{activeScenario.title} Conversation</h1>
           <p className="muted">{SCENARIO_INTRO}</p>
+        </div>
+
+        <div className="controls-row">
+          <label className="toggle-row">
+            Scenario
+            <select
+              className="select-input"
+              value={selectedScenarioId}
+              onChange={(event) => handleScenarioChange(event.target.value)}
+              disabled={isLoading || isListening}
+            >
+              {SCENARIOS.map((scenario) => (
+                <option key={scenario.id} value={scenario.id}>
+                  {scenario.title}
+                </option>
+              ))}
+            </select>
+          </label>
         </div>
 
         <div>
@@ -412,7 +478,7 @@ export default function PracticePage() {
             aria-label="Message to send"
           />
           <button
-            className="secondary-button"
+            className="secondary-button btnPrimary"
             type="submit"
             disabled={isLoading || isListening}
           >
@@ -422,7 +488,7 @@ export default function PracticePage() {
 
         <div className="controls-row">
           <button
-            className="secondary-button"
+            className="secondary-button btnPrimary"
             type="button"
             onClick={toggleRecording}
             disabled={isLoading || !isSpeechRecognitionSupported}
@@ -454,7 +520,7 @@ export default function PracticePage() {
           </label>
 
           <button
-            className="secondary-button ghost-button"
+            className="secondary-button ghost-button btnGhost"
             type="button"
             onClick={handleClearChat}
             disabled={isLoading}
@@ -490,7 +556,7 @@ export default function PracticePage() {
             <h3 className="section-title">Next steps</h3>
             <ul className="suggestions">
               {suggestions.map((suggestion) => (
-                <li key={suggestion} className="suggestion-chip">
+                <li key={suggestion} className="suggestion-chip chip">
                   {suggestion}
                 </li>
               ))}

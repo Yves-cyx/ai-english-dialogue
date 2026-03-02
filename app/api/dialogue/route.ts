@@ -1,4 +1,5 @@
 import { NextResponse } from "next/server";
+import { getScenarioById } from "../../lib/scenarios";
 
 type ConversationMessage = {
   role: "user" | "assistant";
@@ -134,11 +135,15 @@ export async function POST(request: Request) {
   }
 
   try {
+    const rawScenarioId =
+      typeof payload.scenarioId === "string" ? payload.scenarioId : undefined;
+    const scenario = getScenarioById(rawScenarioId);
+
     const deepSeekMessages: DeepSeekMessage[] = [
       {
         role: "system",
         content:
-          "You are a polite, professional hotel receptionist helping with English dialogue practice. Stay in role, keep replies concise and natural, and do not provide meta explanations. Return STRICT JSON only in this exact shape: {\"reply\":\"string\",\"suggestions\":[\"string\",\"string\",\"string\"]}. suggestions must contain exactly 3 short strings.",
+          `${scenario.systemPrompt} Stay in role, keep replies concise and natural, and do not provide meta explanations. Return STRICT JSON only in this exact shape: {"reply":"string","suggestions":["string","string","string"]}. suggestions must contain exactly 3 short strings.`,
       },
       ...messages.map((message) => ({
         role: message.role,
