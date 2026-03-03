@@ -35,6 +35,11 @@ type DeepSeekResponse = {
 };
 
 const MAX_TOTAL_MESSAGE_CHARACTERS = 2000;
+const FALLBACK_SUGGESTIONS = [
+  "Could you help me with the next step?",
+  "Can I confirm the details, please?",
+  "What should I say to sound more natural?",
+];
 
 function isDialogueResponse(value: unknown): value is DialogueApiResponse {
   if (!value || typeof value !== "object") {
@@ -48,6 +53,35 @@ function isDialogueResponse(value: unknown): value is DialogueApiResponse {
     record.suggestions.length === 3 &&
     record.suggestions.every((item) => typeof item === "string")
   );
+}
+
+function parseDialogueContentSafely(content: string): DialogueApiResponse {
+  let parsed: unknown;
+
+  try {
+    parsed = JSON.parse(content);
+  } catch {
+    const firstBrace = content.indexOf("{");
+    const lastBrace = content.lastIndexOf("}");
+
+    if (firstBrace >= 0 && lastBrace > firstBrace) {
+      const jsonCandidate = content.slice(firstBrace, lastBrace + 1);
+      try {
+        parsed = JSON.parse(jsonCandidate);
+      } catch {
+        parsed = undefined;
+      }
+    }
+  }
+
+  if (isDialogueResponse(parsed)) {
+    return parsed;
+  }
+
+  return {
+    reply: content.trim() || "Could you say that again in a simpler way?",
+    suggestions: FALLBACK_SUGGESTIONS,
+  };
 }
 
 function methodNotAllowed() {
@@ -143,7 +177,7 @@ export async function POST(request: Request) {
       {
         role: "system",
         content:
-          `${scenario.systemPrompt} Stay in role, keep replies concise and natural, and do not provide meta explanations. Return STRICT JSON only in this exact shape: {"reply":"string","suggestions":["string","string","string"]}. suggestions must contain exactly 3 short strings.`,
+          `${scenario.systemPrompt} Stay in role, keep replies concise and natural, and do not provide meta explanations. Output ONLY valid JSON with no extra text, no markdown, and no code fences. Use this exact shape: {"reply":"string","suggestions":["string","string","string"]}. suggestions must contain exactly 3 short strings.`,
       },
       ...messages.map((message) => ({
         role: message.role,
@@ -162,7 +196,7 @@ export async function POST(request: Request) {
         body: JSON.stringify({
           model: "deepseek-chat",
           messages: deepSeekMessages,
-          temperature: 0.7,
+          temperature: 0.2,
         }),
       }
     );
@@ -181,11 +215,7 @@ export async function POST(request: Request) {
       throw new Error("DeepSeek returned an empty response.");
     }
 
-    const parsed: unknown = JSON.parse(content);
-
-    if (!isDialogueResponse(parsed)) {
-      throw new Error("DeepSeek returned an unexpected response shape.");
-    }
+    const parsed = parseDialogueContentSafely(content);
 
     return NextResponse.json({
       reply: parsed.reply,

@@ -24,6 +24,25 @@ type DialogueResponse = {
   suggestions: string[];
 };
 
+type AnalysisResponse = {
+  score: number;
+  grammar: Array<{
+    original: string;
+    corrected: string;
+    reason: string;
+  }>;
+  naturalness: {
+    rewrites: string[];
+    notes: string[];
+  };
+  vocabulary: Array<{
+    term: string;
+    meaning_zh: string;
+    meaning_en: string;
+    example: string;
+  }>;
+};
+
 type AccentPreference = "US" | "UK";
 
 type BrowserSpeechRecognitionEvent = {
@@ -58,6 +77,8 @@ const ACCENT_STORAGE_KEY = "aed_accent";
 const SCENARIO_STORAGE_KEY = "aed_scenario_id";
 const SCENARIO_INTRO =
   "Choose a speaking scenario and practice a natural multi-turn conversation.";
+const MAX_DIALOGUE_PAYLOAD_MESSAGES = 10;
+const MAX_DIALOGUE_PAYLOAD_CHARS = 1200;
 
 function isDialogueMessages(value: unknown): value is DialogueMessage[] {
   if (!Array.isArray(value)) {
@@ -77,6 +98,43 @@ function isDialogueMessages(value: unknown): value is DialogueMessage[] {
   });
 }
 
+function buildDialoguePayloadMessages(
+  allMessages: DialogueMessage[]
+): DialogueMessage[] {
+  if (allMessages.length === 0) {
+    return [];
+  }
+
+  const selected: DialogueMessage[] = [];
+  let totalChars = 0;
+
+  for (let index = allMessages.length - 1; index >= 0; index -= 1) {
+    const message = allMessages[index];
+    const isNewest = index === allMessages.length - 1;
+    const nextCount = selected.length + 1;
+    const nextTotalChars = totalChars + message.content.length;
+
+    if (!isNewest) {
+      if (nextCount > MAX_DIALOGUE_PAYLOAD_MESSAGES) {
+        break;
+      }
+      if (nextTotalChars > MAX_DIALOGUE_PAYLOAD_CHARS) {
+        break;
+      }
+    }
+
+    selected.push(message);
+    totalChars = nextTotalChars;
+
+    if (selected.length >= MAX_DIALOGUE_PAYLOAD_MESSAGES) {
+      break;
+    }
+  }
+
+  selected.reverse();
+  return selected.length > 0 ? selected : [allMessages[allMessages.length - 1]];
+}
+
 export default function PracticePage() {
   const [input, setInput] = useState("");
   const [messages, setMessages] = useState<DialogueMessage[]>([]);
@@ -93,10 +151,15 @@ export default function PracticePage() {
   const [selectedScenarioId, setSelectedScenarioId] = useState(
     DEFAULT_SCENARIO_ID
   );
+  const [analysis, setAnalysis] = useState<AnalysisResponse | null>(null);
+  const [analysisError, setAnalysisError] = useState<string | null>(null);
+  const [isAnalyzing, setIsAnalyzing] = useState(false);
 
   const recognitionRef = useRef<BrowserSpeechRecognition | null>(null);
   const transcriptRef = useRef("");
   const messagesRef = useRef<DialogueMessage[]>([]);
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const endRef = useRef<HTMLDivElement | null>(null);
   const mountedRef = useRef(false);
 
   const hasDialogue = useMemo(() => messages.length > 0, [messages.length]);
@@ -104,9 +167,27 @@ export default function PracticePage() {
     () => getScenarioById(selectedScenarioId),
     [selectedScenarioId]
   );
+  const latestUserIndex = useMemo(() => {
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      if (messages[index]?.role === "user") {
+        return index;
+      }
+    }
+    return -1;
+  }, [messages]);
+  const analysisMessages = useMemo(
+    () => (latestUserIndex >= 0 ? messages.slice(0, latestUserIndex + 1) : []),
+    [latestUserIndex, messages]
+  );
+  const canAnalyze =
+    !isLoading && !isListening && !isAnalyzing && analysisMessages.length > 0;
 
   useEffect(() => {
     messagesRef.current = messages;
+  }, [messages]);
+
+  useEffect(() => {
+    endRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [messages]);
 
   useEffect(() => {
@@ -234,11 +315,13 @@ export default function PracticePage() {
       setError(null);
 
       try {
+        const payloadMessages = buildDialoguePayloadMessages(nextMessages);
+
         const response = await fetch("/api/dialogue", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
-            messages: nextMessages,
+            messages: payloadMessages,
             scenarioId: selectedScenarioId,
           }),
         });
@@ -384,6 +467,8 @@ export default function PracticePage() {
     setMessages([]);
     messagesRef.current = [];
     setSuggestions([]);
+    setAnalysis(null);
+    setAnalysisError(null);
     setInput("");
     setError(null);
     if (typeof window !== "undefined") {
@@ -406,6 +491,8 @@ export default function PracticePage() {
       setMessages([]);
       messagesRef.current = [];
       setSuggestions([]);
+      setAnalysis(null);
+      setAnalysisError(null);
       setInput("");
       setError(null);
 
@@ -414,6 +501,62 @@ export default function PracticePage() {
       }
     },
     [isSpeechSynthesisSupported, selectedScenarioId, stopRecording]
+  );
+
+  const handleAnalyze = useCallback(async () => {
+    if (!canAnalyze) {
+      return;
+    }
+
+    setIsAnalyzing(true);
+    setAnalysisError(null);
+
+    try {
+      const response = await fetch("/api/analyze", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          scenarioId: selectedScenarioId,
+          messages: analysisMessages,
+        }),
+      });
+
+      if (!response.ok) {
+        let errorMessage = "Failed to analyze message.";
+
+        try {
+          const errorData = (await response.json()) as { error?: string };
+          if (typeof errorData.error === "string" && errorData.error) {
+            errorMessage = errorData.error;
+          }
+        } catch {
+          // Keep generic message if error response is not valid JSON.
+        }
+
+        throw new Error(errorMessage);
+      }
+
+      const data: AnalysisResponse = await response.json();
+      setAnalysis(data);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : "Failed to analyze message.";
+      setAnalysisError(message);
+    } finally {
+      setIsAnalyzing(false);
+    }
+  }, [analysisMessages, canAnalyze, selectedScenarioId]);
+
+  const handleSuggestionClick = useCallback(
+    (suggestion: string, shouldSend: boolean) => {
+      setInput(suggestion);
+      inputRef.current?.focus();
+
+      if (shouldSend) {
+        void sendMessage(suggestion);
+      }
+    },
+    [sendMessage]
   );
 
   return (
@@ -465,11 +608,13 @@ export default function PracticePage() {
                 Start the conversation with a greeting or question.
               </p>
             )}
+            <div ref={endRef} />
           </div>
         </div>
 
         <form className="input-row" onSubmit={handleSubmit}>
           <input
+            ref={inputRef}
             className="text-input"
             value={input}
             placeholder="Type your message..."
@@ -487,6 +632,15 @@ export default function PracticePage() {
         </form>
 
         <div className="controls-row">
+          <button
+            className="secondary-button btnPrimary"
+            type="button"
+            onClick={handleAnalyze}
+            disabled={!canAnalyze}
+          >
+            {isAnalyzing ? "Analyzing..." : "Analyze"}
+          </button>
+
           <button
             className="secondary-button btnPrimary"
             type="button"
@@ -529,6 +683,87 @@ export default function PracticePage() {
           </button>
         </div>
 
+        {analysisError && (
+          <div className="error" role="alert">
+            {analysisError}
+          </div>
+        )}
+
+        {analysis && (
+          <section className="analysis-panel" aria-live="polite">
+            <h3 className="section-title">Analysis</h3>
+            <p className="analysis-score">Score: {analysis.score}/100</p>
+
+            <div className="analysis-block">
+              <h4 className="analysis-subtitle">Grammar</h4>
+              {analysis.grammar.length > 0 ? (
+                <ul className="analysis-list">
+                  {analysis.grammar.map((item, index) => (
+                    <li key={`${item.original}-${index}`} className="analysis-item">
+                      <p className="analysis-line">
+                        <strong>Original:</strong> {item.original}
+                      </p>
+                      <p className="analysis-line">
+                        <strong>Corrected:</strong> {item.corrected}
+                      </p>
+                      <p className="analysis-line">
+                        <strong>Reason:</strong> {item.reason}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">No grammar corrections needed.</p>
+              )}
+            </div>
+
+            <div className="analysis-block">
+              <h4 className="analysis-subtitle">Naturalness Rewrites</h4>
+              {analysis.naturalness.rewrites.length > 0 ? (
+                <ul className="analysis-list">
+                  {analysis.naturalness.rewrites.map((rewrite, index) => (
+                    <li key={`${rewrite}-${index}`} className="analysis-item">
+                      {rewrite}
+                    </li>
+                  ))}
+                </ul>
+              ) : (
+                <p className="muted">No rewrite suggestions.</p>
+              )}
+
+              {analysis.naturalness.notes.length > 0 && (
+                <ul className="analysis-list">
+                  {analysis.naturalness.notes.map((note, index) => (
+                    <li key={`${note}-${index}`} className="analysis-item">
+                      {note}
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </div>
+
+            <div className="analysis-block">
+              <h4 className="analysis-subtitle">Vocabulary</h4>
+              {analysis.vocabulary.length > 0 ? (
+                <div className="vocab-grid">
+                  {analysis.vocabulary.map((item, index) => (
+                    <article key={`${item.term}-${index}`} className="vocab-card">
+                      <p className="analysis-line">
+                        <strong>{item.term}</strong>
+                      </p>
+                      <p className="analysis-line">ZH: {item.meaning_zh}</p>
+                      <p className="analysis-line">EN: {item.meaning_en}</p>
+                      <p className="analysis-line">Example: {item.example}</p>
+                    </article>
+                  ))}
+                </div>
+              ) : (
+                <p className="muted">No vocabulary suggestions.</p>
+              )}
+            </div>
+          </section>
+        )}
+
         {!isSpeechRecognitionSupported && (
           <p className="support-note">Voice input not supported in this browser.</p>
         )}
@@ -556,8 +791,17 @@ export default function PracticePage() {
             <h3 className="section-title">Next steps</h3>
             <ul className="suggestions">
               {suggestions.map((suggestion) => (
-                <li key={suggestion} className="suggestion-chip chip">
-                  {suggestion}
+                <li key={suggestion}>
+                  <button
+                    className="suggestion-button suggestion-chip chip"
+                    type="button"
+                    disabled={isLoading || isListening}
+                    onClick={(event) =>
+                      handleSuggestionClick(suggestion, event.shiftKey)
+                    }
+                  >
+                    {suggestion}
+                  </button>
                 </li>
               ))}
             </ul>
